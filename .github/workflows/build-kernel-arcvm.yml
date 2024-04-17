@@ -13,17 +13,24 @@ on:
   workflow_call:
   workflow_dispatch:
 
+env:
+  git_tag: chromeos-5.10-arcvm
+  version: 5.10.209
+
 jobs:
   build:
     if: github.event_name != 'pull_request' || (github.event_name == 'pull_request' && !github.event.pull_request.draft)
     strategy:
       matrix:
-        arch: [arm64]
-        version: ["5.10.178"]
         include:
+          - arch: x86_64
+            kernel_image_name: bzImage
+            build_config: build.config.gki.x86_64
+            defconfig: x86_64_defconfig
           - arch: arm64
-            git_tag: chromeos-5.10-arcvm
-            file_name: "bzImage"
+            kernel_image_name: Image
+            build_config: build.config.gki.aarch64
+            defconfig: defconfig
 
     name: Build ChromeOS ARCVM kernel
     runs-on: ubuntu-20.04
@@ -41,9 +48,7 @@ jobs:
               libelf-dev libssl-dev lsb-release software-properties-common wget \
               libncurses-dev binutils-aarch64-linux-gnu gcc-aarch64-linux-gnu nuget gzip \
               rsync python3 device-tree-compiler
-
           sudo ln -s --force python3 /usr/bin/python
-
           export LLVM_VERSION=12
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
@@ -58,7 +63,6 @@ jobs:
           sudo ln -s --force /usr/bin/llvm-objcopy-$LLVM_VERSION /usr/bin/llvm-objcopy
           sudo ln -s --force /usr/bin/llvm-readelf-$LLVM_VERSION /usr/bin/llvm-readelf
           sudo ln -s --force /usr/bin/clang++-$LLVM_VERSION /usr/bin/clang++
-
       - name: Checkout KernelSU
         uses: actions/checkout@v4
         with:
@@ -66,7 +70,7 @@ jobs:
           fetch-depth: 0
 
       - name: Setup kernel source
-        run: git clone https://chromium.googlesource.com/chromiumos/third_party/kernel.git -b ${{ matrix.git_tag }} --depth=1
+        run: git clone https://chromium.googlesource.com/chromiumos/third_party/kernel.git -b ${{ env.git_tag }} --depth=1
 
       - name: Setup KernelSU
         working-directory: kernel
@@ -76,73 +80,37 @@ jobs:
           echo "[+] KERNEL_ROOT: $KERNEL_ROOT"
           echo "[+] Copy KernelSU driver to $KERNEL_ROOT/drivers"
           ln -sf $GITHUB_WORKSPACE/KernelSU/kernel $KERNEL_ROOT/drivers/kernelsu
-
           echo "[+] Add KernelSU driver to Makefile"
           DRIVER_MAKEFILE=$KERNEL_ROOT/drivers/Makefile
           grep -q "kernelsu" $DRIVER_MAKEFILE || echo "obj-y += kernelsu/" >> $DRIVER_MAKEFILE
-
           echo "[+] Apply KernelSU patches"
           cd $KERNEL_ROOT && git apply $GITHUB_WORKSPACE/KernelSU/.github/patches/5.10/*.patch || echo "[-] No patch found"
-
           echo "[+] Patch script/setlocalversion"
           sed -i 's/-dirty//g' $KERNEL_ROOT/scripts/setlocalversion
-
           echo "[+] KernelSU setup done."
           cd $GITHUB_WORKSPACE/KernelSU
           VERSION=$(($(git rev-list --count HEAD) + 10200))
           echo "VERSION: $VERSION"
           echo "kernelsu_version=$VERSION" >> $GITHUB_ENV
-
       - name: Build Kernel
         working-directory: kernel
+        env:
+          KERNEL_IMAGE_NAME: ${{ matrix.kernel_image_name }}
+          ARCH: ${{ matrix.arch }}
         run: |
-          set -a && . build.config.gki.aarch64; set +a
-          export DEFCONFIG=arm64_arcvm_defconfig
+          set -a && . ${{ matrix.build_config }}; set +a
+          export DEFCONFIG=${{ matrix.defconfig }}
           if [ ! -z ${{ vars.EXPECTED_SIZE }} ] && [ ! -z ${{ vars.EXPECTED_HASH }} ]; then
             export KSU_EXPECTED_SIZE=${{ vars.EXPECTED_SIZE }}
             export KSU_EXPECTED_HASH=${{ vars.EXPECTED_HASH }}
           fi
-
           make LLVM=1 LLVM_IAS=1 DEPMOD=depmod DTC=dtc O=${PWD} mrproper
           make LLVM=1 LLVM_IAS=1 DEPMOD=depmod DTC=dtc O=${PWD} ${DEFCONFIG} < /dev/null
           scripts/config --file .config -e LTO_CLANG -d LTO_NONE -e LTO_CLANG_THIN -d LTO_CLANG_FULL -e THINLTO
-          make LLVM=1 LLVM_IAS=1 DEPMOD=depmod DTC=dtc O=${PWD} -j$(nproc) bzImage modules prepare-objtool
-
-          echo "file_path=${PWD}/arch/arm64/boot/bzImage" >> $GITHUB_ENV
-
-      - name: Upload kernel-ARCVM-${{ matrix.arch }}-${{ matrix.version }}
+          make LLVM=1 LLVM_IAS=1 DEPMOD=depmod DTC=dtc O=${PWD} -j$(nproc) ${KERNEL_IMAGE_NAME} modules prepare-objtool
+          echo "file_path=${PWD}/arch/${ARCH}/boot/${KERNEL_IMAGE_NAME}" >> $GITHUB_ENV
+      - name: Upload kernel-ARCVM-${{ matrix.arch }}-${{ env.version }}
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-ARCVM-${{ matrix.arch }}-${{ matrix.version }}
+          name: kernel-ARCVM-${{ matrix.arch }}-${{ env.version }}
           path: "${{ env.file_path }}"
-
-      - name: Bot session cache
-        if: ${{ ( github.event_name == 'push' && github.ref == 'refs/heads/main' ) || github.ref_type == 'tag' }}
-        id: bot_session_cache
-        uses: actions/cache@v3
-        with:
-          path: scripts/ksubot.session
-          key: ${{ runner.os }}-bot-session
-
-      - name: Post to Telegram
-        if: ${{ ( github.event_name == 'push' && github.ref == 'refs/heads/main' ) || github.ref_type == 'tag' }}
-        env:
-          CHAT_ID: ${{ secrets.CHAT_ID }}
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          MESSAGE_THREAD_ID: ${{ secrets.MESSAGE_THREAD_ID }}
-          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
-          COMMIT_URL: ${{ github.event.head_commit.url }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          TITLE=kernel-ARCVM-${{ matrix.arch }}-${{ matrix.version }}
-          echo "[+] title: $TITLE"
-          export TITLE
-          export VERSION="${{ env.kernelsu_version }}"
-          echo "[+] Compress images"
-          gzip -n -f -9 "${{ env.file_path }}"
-          echo "[+] Image to upload"
-          ls -l "${{ env.file_path }}.gz"
-          if [ -n "${{ secrets.BOT_TOKEN }}" ]; then
-            pip3 install telethon==1.31.1
-            python3 "$GITHUB_WORKSPACE/KernelSU/scripts/ksubot.py" "${{ env.file_path }}.gz"
-          fi
