@@ -18,10 +18,10 @@ jobs:
     if: github.event_name != 'pull_request' || (github.event_name == 'pull_request' && !github.event.pull_request.draft)
     strategy:
       matrix:
-        arch: [x86_64]
+        arch: [arm64]
         version: ["5.10.178"]
         include:
-          - arch: x86_64
+          - arch: arm64
             git_tag: chromeos-5.10-arcvm
             file_name: "bzImage"
 
@@ -96,8 +96,8 @@ jobs:
       - name: Build Kernel
         working-directory: kernel
         run: |
-          set -a && . build.config.gki.x86_64; set +a
-          export DEFCONFIG=x86_64_arcvm_defconfig
+          set -a && . build.config.gki.arm64; set +a
+          export DEFCONFIG=arm64_arcvm_defconfig
           if [ ! -z ${{ vars.EXPECTED_SIZE }} ] && [ ! -z ${{ vars.EXPECTED_HASH }} ]; then
             export KSU_EXPECTED_SIZE=${{ vars.EXPECTED_SIZE }}
             export KSU_EXPECTED_HASH=${{ vars.EXPECTED_HASH }}
@@ -108,7 +108,7 @@ jobs:
           scripts/config --file .config -e LTO_CLANG -d LTO_NONE -e LTO_CLANG_THIN -d LTO_CLANG_FULL -e THINLTO
           make LLVM=1 LLVM_IAS=1 DEPMOD=depmod DTC=dtc O=${PWD} -j$(nproc) bzImage modules prepare-objtool
 
-          echo "file_path=${PWD}/arch/x86/boot/bzImage" >> $GITHUB_ENV
+          echo "file_path=${PWD}/arch/arm64/boot/bzImage" >> $GITHUB_ENV
 
       - name: Upload kernel-ARCVM-${{ matrix.arch }}-${{ matrix.version }}
         uses: actions/upload-artifact@v4
